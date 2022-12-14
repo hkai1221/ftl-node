@@ -1,4 +1,4 @@
-
+const nodemailer = require("nodemailer");
 // 转义html
 // var escapeHtml = require('escape-html');
 // object对象合并模块
@@ -19,7 +19,7 @@ var consoleErrors = [];
 var getFtlData, parseInclude, createFile, deleteFiles,
 	parseToFtlData, formatTime, getOneModuleData, getReq,
 	parseFtl, getFtlConsoleErrorString, getConsoleErrors, 
-	parseMatchInclude, parseOne, insertajaxMock;
+	parseMatchInclude, parseOne, insertajaxMock, sendEmailFn;
 var regStartslash = /^(\\|\/).+/;
 exports = module.exports = function serveFtl(port) {
   	return function serveFtl(req, res, next) {
@@ -101,7 +101,8 @@ exports = module.exports = function serveFtl(port) {
 							res: res,
 							data: data,
 							// freemarker 版本大于等于2.3.24新增可以自动转码输出内容，该功能与 <#escape>标签相互冲突,使用后不能使用<#escape></#noescape>
-							ftlFormat: !!commandConfig.ftlFormat
+							ftlFormat: !!commandConfig.ftlFormat,
+							commandConfig: commandConfig
 						}, !!commandConfig.isMockAjax);
 					})
 					.catch(function(err) {
@@ -414,7 +415,7 @@ getReq = function(req, data, webPort) {
  * @param res request请求对象
  * @returns {*}
  */
-parseFtl = function(opt, isMockAjax) {
+parseFtl = function(opt, isMockAjax, commandConfig) {
 	var cmd;
 	var stdout;
 	var stderr;
@@ -424,6 +425,7 @@ parseFtl = function(opt, isMockAjax) {
 		tmpFilePaths = opt.tmpFilePaths,
 		res = opt.res,
 		data = opt.data;
+	var sendFlag = data.request.query.op === 'send';
 	data = JSON.stringify(data, function(current, value) {
 		if (typeof value === 'object') {
 			for (var key in value) {
@@ -482,12 +484,56 @@ parseFtl = function(opt, isMockAjax) {
 				});
 				var messages = message.split(/\\r\\n/);
 				var consoleError='<script> if (window.console && console.log && console.group) {'+ getFtlConsoleErrorString(messages) + getConsoleErrors() + '}  </script>';
+
+				// hk- 注入js脚本
+				var globalJs = `
+					<script>
+						let sendBtn = document.createElement('div');
+						sendBtn.innerText = "Send Email";
+						sendBtn.style.position = "fixed";
+						sendBtn.style.top = "10px";
+						sendBtn.style.right = "10px";
+						sendBtn.style.padding = "10px";
+						sendBtn.style.padding = "10px";
+						sendBtn.style.borderRadius = "4px";
+						sendBtn.style.cursor = "pointer";
+						sendBtn.style.border = "2px solid #000";
+						sendBtn.style.lineHeight = "30px";
+						sendBtn.style.height = "30px";
+						window.document.body.appendChild(sendBtn);
+						sendBtn.addEventListener('click',()=>{
+							const url = window.location.href + '?op=send';
+							fetch(url).then(function(res){
+								return res.text();
+							}).then(function(code){
+								if(code.toString()==="200"){
+									sendBtn.innerText = "Send Success";
+									sendBtn.style.color = "#5db307";
+									sendBtn.style.pointerEvents = "none";
+									setTimeout(()=>{
+										sendBtn.innerText = "Send Email";
+										sendBtn.style.color = "#000";
+										sendBtn.style.pointerEvents = "auto";
+									},3000)
+								}
+							})
+						})
+					</script>
+				`
+				if(!sendFlag) consoleError = consoleError + globalJs;
+				// hk- 注入js脚本
+
 				reg.test(finalData) ? (finalData = finalData.replace(reg, consoleError + "</body>")) : (finalData += consoleError);
 				// 需要ajax mock假数据
 				if (isMockAjax) {
 					finalData = insertajaxMock(finalData);
 				}
-				res.send(finalData);
+				if(sendFlag){
+					sendEmailFn(opt, finalData);
+					res.end("200");
+				}else{
+					res.send(finalData);
+				}
 			} else {
 			// 没有错误ftl输出为空
 				if (!data.wrongData) {
@@ -550,4 +596,36 @@ getConsoleErrors = function() {
 		}).join('');
 	}
 	return "";
+};
+
+sendEmailFn = function (opt, sendData) {
+	const commandConfig = opt.commandConfig;
+	const pathObject = opt.req.pathObject;
+	const transporter = nodemailer.createTransport({
+		service: "163", //  邮箱
+		secure: true, //  安全的发送模式
+		auth: {
+			user: commandConfig.emailFrom, //  发件人邮箱
+			pass: commandConfig.auth, //  授权码
+		},
+	});
+	transporter.sendMail(
+		{
+			// 发件人邮箱
+			from: commandConfig.emailFrom,
+			// 邮件标题
+			subject: pathObject.path,
+			// 目标邮箱
+			to: commandConfig.emailTo,
+			// 邮件内容
+			html: sendData,
+		},
+		(err, data) => {
+			if (err) {
+				console.error(err);
+			} else {
+				console.log(data);
+			}
+		}
+	);
 };
